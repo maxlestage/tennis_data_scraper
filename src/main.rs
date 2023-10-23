@@ -1,13 +1,16 @@
 use csv::Writer;
 use fantoccini::{ClientBuilder, Locator};
 use scraper::{Html, Selector};
+// use serde_json::json;
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{BufReader, Error, Read, Write},
 };
+use tokio::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    let start: Instant = Instant::now();
     let _ = get_data().await;
 
     let formatted_contents: String = format!("{}", &reading_file());
@@ -32,6 +35,11 @@ async fn main() -> Result<(), Error> {
 
     wtr.flush()?;
 
+    fs::remove_file("index.html")?;
+    // txt_to_json();
+
+    let duration: std::time::Duration = start.elapsed();
+    println!("Time elapsed: {:?}", duration);
     Ok(())
 }
 
@@ -42,7 +50,7 @@ async fn get_data() -> Result<(), fantoccini::error::CmdError> {
         .expect("failed to connect to WebDriver");
 
     client
-        .goto("https://www.tennisabstract.com/cgi-bin/player-classic.cgi?p=RogerFederer")
+        .goto("https://www.tennisabstract.com/cgi-bin/player-classic.cgi?p=StefanosTsitsipas")
         .await
         .expect("failed to go to website");
 
@@ -68,3 +76,23 @@ fn reading_file() -> String {
     // Ok(())
     contents
 }
+
+// fn txt_to_json() {
+//     // Lire le fichier texte
+//     let data: String =
+//         fs::read_to_string("joueurs_tennis_1.txt").expect("Erreur lors de la lecture du fichier");
+
+//     // Diviser le contenu du fichier texte en un vecteur de noms
+//     let noms: Vec<&str> = data.split('\n').collect();
+
+//     // Créer un objet Rust avec la structure requise
+//     let obj: serde_json::Value = json!({
+//         "joueurs": noms
+//     });
+
+//     // Convertir l'objet en une chaîne JSON
+//     let json: String = obj.to_string();
+
+//     // Écrire la chaîne JSON dans un fichier
+//     fs::write("joueurs.json", json).expect("Erreur lors de l'écriture du fichier");
+// }
