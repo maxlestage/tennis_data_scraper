@@ -8,32 +8,18 @@ use std::{
 };
 use tokio::time::Instant;
 
+use std::env;
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let start: Instant = Instant::now();
-    let _ = get_data().await;
+    let args: Vec<String> = env::args().collect();
 
-    let formatted_contents: String = format!("{}", &reading_file());
-    let html: &str = formatted_contents.as_str();
+    let player1: &String = &args[1];
 
-    let fragment: Html = Html::parse_fragment(html);
-    let selector: Selector = Selector::parse("tr").unwrap();
-    let mut wtr: Writer<File> = Writer::from_path("output.csv")?;
+    let _ = get_data(player1).await;
 
-    for element in fragment.select(&selector) {
-        let mut row: Vec<String> = Vec::new();
-        for text in element.text() {
-            let trimmed_text: &str = text.trim();
-            if !trimmed_text.is_empty() {
-                row.push(trimmed_text.to_string());
-            }
-        }
-        if row.len() == 13 {
-            wtr.write_record(&row)?;
-        }
-    }
-
-    wtr.flush()?;
+    let _ = create_data_for_each_players(player1);
 
     fs::remove_file("index.html")?;
     // txt_to_json();
@@ -43,14 +29,18 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn get_data() -> Result<(), fantoccini::error::CmdError> {
+async fn get_data(player: &str) -> Result<(), fantoccini::error::CmdError> {
+    let url: String = format!(
+        "https://www.tennisabstract.com/cgi-bin/player-classic.cgi?p={}",
+        player
+    );
     let client: fantoccini::Client = ClientBuilder::native()
         .connect("http://127.0.0.1:4444")
         .await
         .expect("failed to connect to WebDriver");
 
     client
-        .goto("https://www.tennisabstract.com/cgi-bin/player-classic.cgi?p=StefanosTsitsipas")
+        .goto(url.as_str())
         .await
         .expect("failed to go to website");
 
@@ -75,6 +65,34 @@ fn reading_file() -> String {
     // println!("{}", contents);
     // Ok(())
     contents
+}
+
+fn create_data_for_each_players(player: &str) -> Result<(), Error> {
+    let file_name: String = format!("./Data/{player}.csv");
+
+    let formatted_contents: String = format!("{}", &reading_file());
+    let html: &str = formatted_contents.as_str();
+
+    let fragment: Html = Html::parse_fragment(html);
+    let selector: Selector = Selector::parse("tr").unwrap();
+    let mut wtr: Writer<File> = Writer::from_path(file_name.as_str())?;
+
+    for element in fragment.select(&selector) {
+        let mut row: Vec<String> = Vec::new();
+        for text in element.text() {
+            let trimmed_text: &str = text.trim();
+            if !trimmed_text.is_empty() {
+                row.push(trimmed_text.to_string());
+            }
+        }
+        if row.len() == 13 {
+            wtr.write_record(&row)?;
+        }
+    }
+
+    wtr.flush()?;
+
+    Ok(())
 }
 
 // fn txt_to_json() {
