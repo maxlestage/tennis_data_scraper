@@ -1,116 +1,108 @@
 use csv::Writer;
-use fantoccini::{ClientBuilder, Locator};
+use fantoccini::{Client, ClientBuilder, Locator};
+use rayon::prelude::*;
 use scraper::{Html, Selector};
-// use serde_json::json;
-use std::{
-    fs::{self, File},
-    io::{BufReader, Error, Read, Write},
-};
+use std::{env, fs, path::PathBuf};
 use tokio::time::Instant;
 
-use std::env;
+/// Address of the running WebDriver (e.g. `geckodriver`/`chromedriver`).
+const WEBDRIVER_URL: &str = "http://127.0.0.1:4444";
+/// Directory where the per-player CSV files are written.
+const OUTPUT_DIR: &str = "./Data";
+/// Number of columns a valid statistics row is expected to have.
+const EXPECTED_COLUMNS: usize = 13;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<(), BoxError> {
     let start: Instant = Instant::now();
-    let args: Vec<String> = env::args().collect();
 
-    let player1: &String = &args[1];
+    let players: Vec<String> = env::args().skip(1).collect();
+    if players.is_empty() {
+        eprintln!("Usage: tennis_data_scraper <player> [<player> ...]");
+        std::process::exit(1);
+    }
 
-    let _ = get_data(player1).await;
+    // 1. Scrape sequentially over a single WebDriver session (network bound).
+    let pages: Vec<(String, String)> = scrape_players(&players).await?;
 
-    let _ = create_data_for_each_players(player1);
+    // 2. Make sure the output directory exists before writing.
+    fs::create_dir_all(OUTPUT_DIR)?;
 
-    fs::remove_file("index.html")?;
-    // txt_to_json();
+    // 3. Parse the collected HTML and write each CSV in parallel (CPU bound).
+    //    rayon lets us process every player's page on a separate worker thread.
+    pages
+        .par_iter()
+        .map(|(player, html)| (player, write_player_csv(player, html)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|(player, result)| match result {
+            Ok(rows) => println!("✓ {player}: {rows} rows written"),
+            Err(e) => eprintln!("✗ {player}: {e}"),
+        });
 
-    let duration: std::time::Duration = start.elapsed();
-    println!("Time elapsed: {:?}", duration);
+    println!("Time elapsed: {:?}", start.elapsed());
     Ok(())
 }
 
-async fn get_data(player: &str) -> Result<(), fantoccini::error::CmdError> {
-    let url: String = format!(
-        "https://www.tennisabstract.com/cgi-bin/player-classic.cgi?p={}",
-        player
-    );
-    let client: fantoccini::Client = ClientBuilder::native()
-        .connect("http://127.0.0.1:4444")
+/// Fetches the raw page HTML for every requested player, reusing a single
+/// WebDriver session. A failure on one player is logged and skipped rather
+/// than aborting the whole run.
+async fn scrape_players(players: &[String]) -> Result<Vec<(String, String)>, BoxError> {
+    let client: Client = ClientBuilder::native()
+        .connect(WEBDRIVER_URL)
         .await
-        .expect("failed to connect to WebDriver");
+        .map_err(|e| format!("failed to connect to WebDriver at {WEBDRIVER_URL}: {e}"))?;
 
-    client
-        .goto(url.as_str())
-        .await
-        .expect("failed to go to website");
-
-    let body: fantoccini::elements::Element = client
-        .find(Locator::Css("body"))
-        .await
-        .expect("failed to find body");
-
-    let html: String = body.html(false).await.expect("failed to get HTML");
-
-    let mut file: File = File::create("index.html")?;
-    file.write_all(html.as_bytes())?;
-
-    client.close().await
-}
-
-fn reading_file() -> String {
-    let file: File = File::open("index.html").unwrap();
-    let mut buf_reader: BufReader<File> = BufReader::new(file);
-    let mut contents: String = String::new();
-    buf_reader.read_to_string(&mut contents).unwrap();
-    // println!("{}", contents);
-    // Ok(())
-    contents
-}
-
-fn create_data_for_each_players(player: &str) -> Result<(), Error> {
-    let file_name: String = format!("./Data/{player}.csv");
-
-    let formatted_contents: String = format!("{}", &reading_file());
-    let html: &str = formatted_contents.as_str();
-
-    let fragment: Html = Html::parse_fragment(html);
-    let selector: Selector = Selector::parse("tr").unwrap();
-    let mut wtr: Writer<File> = Writer::from_path(file_name.as_str())?;
-
-    for element in fragment.select(&selector) {
-        let mut row: Vec<String> = Vec::new();
-        for text in element.text() {
-            let trimmed_text: &str = text.trim();
-            if !trimmed_text.is_empty() {
-                row.push(trimmed_text.to_string());
-            }
-        }
-        if row.len() == 13 {
-            wtr.write_record(&row)?;
+    let mut pages: Vec<(String, String)> = Vec::with_capacity(players.len());
+    for player in players {
+        match fetch_player_html(&client, player).await {
+            Ok(html) => pages.push((player.clone(), html)),
+            Err(e) => eprintln!("✗ {player}: failed to fetch page ({e})"),
         }
     }
 
-    wtr.flush()?;
-
-    Ok(())
+    client.close().await?;
+    Ok(pages)
 }
 
-// fn txt_to_json() {
-//     // Lire le fichier texte
-//     let data: String =
-//         fs::read_to_string("joueurs_tennis_1.txt").expect("Erreur lors de la lecture du fichier");
+/// Navigates to a player's Tennis Abstract page and returns the `<body>` HTML.
+async fn fetch_player_html(client: &Client, player: &str) -> Result<String, fantoccini::error::CmdError> {
+    let url: String = format!(
+        "https://www.tennisabstract.com/cgi-bin/player-classic.cgi?p={player}"
+    );
 
-//     // Diviser le contenu du fichier texte en un vecteur de noms
-//     let noms: Vec<&str> = data.split('\n').collect();
+    client.goto(&url).await?;
+    let body: fantoccini::elements::Element = client.find(Locator::Css("body")).await?;
+    body.html(false).await
+}
 
-//     // Créer un objet Rust avec la structure requise
-//     let obj: serde_json::Value = json!({
-//         "joueurs": noms
-//     });
+/// Parses the player's HTML, extracting every statistics table row, and writes
+/// them to `Data/<player>.csv`. Returns the number of rows written.
+fn write_player_csv(player: &str, html: &str) -> Result<usize, BoxError> {
+    let path: PathBuf = PathBuf::from(OUTPUT_DIR).join(format!("{player}.csv"));
 
-//     // Convertir l'objet en une chaîne JSON
-//     let json: String = obj.to_string();
+    let fragment: Html = Html::parse_fragment(html);
+    let row_selector: Selector =
+        Selector::parse("tr").expect("\"tr\" is a valid CSS selector");
 
-//     // Écrire la chaîne JSON dans un fichier
-//     fs::write("joueurs.json", json).expect("Erreur lors de l'écriture du fichier");
-// }
+    let mut writer: Writer<fs::File> = Writer::from_path(&path)?;
+    let mut written: usize = 0;
+
+    for element in fragment.select(&row_selector) {
+        let row: Vec<&str> = element
+            .text()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect();
+
+        if row.len() == EXPECTED_COLUMNS {
+            writer.write_record(&row)?;
+            written += 1;
+        }
+    }
+
+    writer.flush()?;
+    Ok(written)
+}
